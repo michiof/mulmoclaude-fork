@@ -1,6 +1,9 @@
 import type { constants } from "node:os";
 
-export type SignalName = keyof typeof constants.signals;
+/** Signal 0 delivers nothing; it only asks whether the target still exists. */
+export const EXISTENCE_PROBE_SIGNAL = 0;
+
+export type SignalName = keyof typeof constants.signals | typeof EXISTENCE_PROBE_SIGNAL;
 export type SignalSender = (pid: number, signal: SignalName) => void;
 
 /** `gone` (ESRCH) is the only result that proves the group has exited;

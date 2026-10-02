@@ -1,8 +1,8 @@
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { createShimCloser, killAllShimGroups } from "../../server/agent/stdioHttpShim.js";
+import { createShimCloser, isTrackedShimGroup, killAllShimGroups } from "../../server/agent/stdioHttpShim.js";
 
 const GRACE_MS = 200;
 const DEATH_WAIT_MS = 5000;
@@ -14,8 +14,22 @@ const PLAIN_TREE = "sh -c 'sleep 60 & echo $!; wait'";
 // An ignored signal is inherited, so every level here ignores SIGTERM.
 const TERM_IGNORING_TREE = "trap '' TERM; sh -c 'sleep 60 & echo $!; wait'";
 
+const spawnedGroups: number[] = [];
+
+// A failed assertion must not leave detached sleeps running on the CI host.
+after(() => {
+  spawnedGroups.forEach((pid) => {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  });
+});
+
 function spawnTree(script: string = PLAIN_TREE): Promise<{ child: ChildProcess; grandchildPid: number }> {
   const child = spawn("sh", ["-c", script], { stdio: ["ignore", "pipe", "ignore"], detached: true });
+  if (child.pid !== undefined) spawnedGroups.push(child.pid);
   return new Promise((resolve, reject) => {
     child.stdout?.once("data", (chunk: Buffer) => resolve({ child, grandchildPid: Number(chunk.toString().trim()) }));
     child.once("error", reject);
@@ -71,5 +85,19 @@ describe("createShimCloser", { skip: process.platform === "win32" }, () => {
     createShimCloser(child, GRACE_MS);
     killAllShimGroups();
     assert.equal(await waitForDeath(grandchildPid), true);
+  });
+
+  it("stops tracking a shim whose group exits on its own, so close() signals nothing", async () => {
+    const child = spawn("sh", ["-c", "exit 0"], { stdio: "ignore", detached: true });
+    const exited = once(child, "exit");
+    const close = createShimCloser(child, GRACE_MS);
+    await exited;
+    const deadline = Date.now() + DEATH_WAIT_MS;
+    while (child.pid !== undefined && isTrackedShimGroup(child.pid) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    }
+    assert.equal(child.pid !== undefined && isTrackedShimGroup(child.pid), false);
+    close();
+    assert.equal(child.pid !== undefined && isTrackedShimGroup(child.pid), false);
   });
 });

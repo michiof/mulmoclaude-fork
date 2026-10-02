@@ -23,7 +23,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import type { Readable } from "node:stream";
 
 import { findAvailablePort } from "../utils/port.mjs";
-import { signalProcessGroup } from "./processGroup.js";
+import { EXISTENCE_PROBE_SIGNAL, signalProcessGroup } from "./processGroup.js";
 import { log } from "../system/logger/index.js";
 import { errorMessage } from "../utils/errors.js";
 import { ONE_SECOND_MS } from "../utils/time.js";
@@ -79,48 +79,83 @@ const SHIM_PORT_RANGE_START = 39_100;
 const SHIM_READY_TIMEOUT_MS = 15 * ONE_SECOND_MS;
 const SHIM_READY_POLL_MS = ONE_SECOND_MS / 4;
 const SHIM_KILL_GRACE_MS = 5 * ONE_SECOND_MS;
+const SHIM_EXIT_POLL_MS = ONE_SECOND_MS / 4;
 
 // The port is bound by a grandchild (npx → sh → supergateway), and a
 // SIGTERM to `npx` alone does not reliably reach it (#3357). Each shim
 // therefore runs in its own process group and is ended as a group —
 // which also means a terminal Ctrl+C no longer reaches it, so the
 // server's own exit has to.
-const liveShimGroups = new Set<number>();
+// pid → the post-close exit poll, once close() has started one.
+const liveShimGroups = new Map<number, ReturnType<typeof setInterval> | undefined>();
 let isExitHookInstalled = false;
 
+export function isTrackedShimGroup(pid: number): boolean {
+  return liveShimGroups.has(pid);
+}
+
 export function killAllShimGroups(): void {
-  liveShimGroups.forEach((pid) => signalProcessGroup(pid, "SIGKILL"));
-  liveShimGroups.clear();
+  [...liveShimGroups.keys()].forEach(forceKillShimGroup);
 }
 
 function trackShimGroup(pid: number | undefined): void {
   if (pid === undefined) return;
-  liveShimGroups.add(pid);
+  liveShimGroups.set(pid, undefined);
   if (isExitHookInstalled) return;
   isExitHookInstalled = true;
   // 'exit' also fires for graceful shutdown's process.exit() and after an uncaught throw.
   process.once("exit", killAllShimGroups);
 }
 
+function untrackShimGroup(pid: number): void {
+  clearInterval(liveShimGroups.get(pid));
+  liveShimGroups.delete(pid);
+}
+
+function forceKillShimGroup(pid: number): void {
+  // Kept on failure so the exit hook retries it.
+  if (signalProcessGroup(pid, "SIGKILL") === "failed") {
+    log.warn("mcp-shim", "could not kill stdio→http shim process group — its port may stay bound", { pid });
+    return;
+  }
+  untrackShimGroup(pid);
+}
+
+// Watches by polling, never by waiting blind: once the group is empty its id
+// can be reused, and a signal sent after that could hit an unrelated group.
+// Past `deadline` (if any) whatever is left is SIGKILLed.
+function pollShimGroup(pid: number, intervalMs: number, deadline: number = Number.POSITIVE_INFINITY): void {
+  clearInterval(liveShimGroups.get(pid));
+  const poll = setInterval(() => {
+    if (signalProcessGroup(pid, EXISTENCE_PROBE_SIGNAL) === "gone") {
+      untrackShimGroup(pid);
+      return;
+    }
+    if (Date.now() < deadline) return;
+    clearInterval(poll);
+    forceKillShimGroup(pid);
+  }, intervalMs);
+  poll.unref();
+  liveShimGroups.set(pid, poll);
+}
+
 /** Idempotent closer for a child spawned with `detached: true`: SIGTERM
- *  to the whole group, then SIGKILL to whatever ignored it. */
+ *  to the whole group, then SIGKILL to whatever is still there. */
 export function createShimCloser(child: ChildProcess, graceMs: number = SHIM_KILL_GRACE_MS): () => void {
   const { pid } = child;
   trackShimGroup(pid);
   let isClosed = false;
+  // A shim can die on its own mid-turn; untrack it once its group empties so
+  // close() never signals an id that may since have been reused.
+  child.once("exit", () => {
+    if (!isClosed && pid !== undefined && liveShimGroups.has(pid)) pollShimGroup(pid, SHIM_EXIT_POLL_MS);
+  });
   return () => {
-    if (isClosed) return;
+    if (isClosed || pid === undefined) return;
     isClosed = true;
+    if (!liveShimGroups.has(pid)) return;
     signalProcessGroup(pid, "SIGTERM");
-    setTimeout(() => {
-      if (pid === undefined) return;
-      // Kept on failure so the exit hook retries it.
-      if (signalProcessGroup(pid, "SIGKILL") === "failed") {
-        log.warn("mcp-shim", "could not kill stdio→http shim process group — its port may stay bound", { pid });
-        return;
-      }
-      liveShimGroups.delete(pid);
-    }, graceMs).unref();
+    pollShimGroup(pid, Math.min(SHIM_EXIT_POLL_MS, graceMs), Date.now() + graceMs);
   };
 }
 
