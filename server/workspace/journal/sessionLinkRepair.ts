@@ -212,7 +212,7 @@ function isEditableParagraph(text: string): boolean {
 
 // Points links that resolve to `<workspace>/chat/<id>.jsonl` at the real `conversations/chat/<id>.jsonl`.
 // A link is left alone when the session file exists in neither place, so links to deleted sessions are not touched.
-// Supported form: inline links `[text](href)` in prose. Fenced code, inline code spans (also across lines), paragraphs with raw HTML or an
+// Rewrites link-shaped `[text](href)` destinations in editable prose (the scanner does not tell images, escaped or nested brackets apart). Fenced code, inline code spans (also across lines), paragraphs with raw HTML or an
 // indented-code start, titled links (`[t](href "title")`), reference-style and angle-bracket links are left exactly as written.
 export function repairSessionLinks(fileWsPath: string, content: string, sessionExists: (sessionId: string) => boolean): SessionLinkRepairResult {
   const currentDir = path.posix.dirname(fileWsPath);

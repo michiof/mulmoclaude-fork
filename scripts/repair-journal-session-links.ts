@@ -1,6 +1,6 @@
 // Manual one-off (#3417): rewrites session links in existing journal summaries that were written as
 // `/chat/<id>.jsonl` and therefore resolve to `<workspace>/chat/`, which does not exist.
-// Usage: yarn journal:repair-links [--dry-run] [--workspace <dir>]. Stop the MulmoClaude server first so a journal pass cannot write the same files.
+// Usage: yarn journal:repair-links [--dry-run] [--workspace <dir>]; any other argument is an error. Stop the MulmoClaude server first so a journal pass cannot write the same files.
 
 import path from "node:path";
 import fsp from "node:fs/promises";
@@ -11,10 +11,24 @@ import { repairSessionLinks } from "../server/workspace/journal/sessionLinkRepai
 
 const JSONL_SUFFIX = ".jsonl";
 
-function parseWorkspaceArg(argv: string[]): string {
-  const flagIndex = argv.indexOf("--workspace");
-  const value = flagIndex === -1 ? undefined : argv[flagIndex + 1];
-  return value === undefined ? workspacePath : path.resolve(value);
+const FLAG_PREFIX = "--";
+const DRY_RUN_FLAG = "--dry-run";
+const WORKSPACE_FLAG = "--workspace";
+
+interface ParsedArgs {
+  dryRun: boolean;
+  workspaceRoot: string;
+}
+
+// Strict on purpose: this rewrites files in place, so a typo or a flag without its value must stop the run, never fall back to a default.
+function parseArgs(args: string[], parsed: ParsedArgs = { dryRun: false, workspaceRoot: workspacePath }): ParsedArgs {
+  const [arg, ...rest] = args;
+  if (arg === undefined) return parsed;
+  if (arg === DRY_RUN_FLAG) return parseArgs(rest, { ...parsed, dryRun: true });
+  if (arg !== WORKSPACE_FLAG) throw new Error(`unknown argument "${arg}" (expected ${DRY_RUN_FLAG} or ${WORKSPACE_FLAG} <dir>)`);
+  const [value, ...afterValue] = rest;
+  if (value === undefined || value.startsWith(FLAG_PREFIX)) throw new Error(`${WORKSPACE_FLAG} needs a directory`);
+  return parseArgs(afterValue, { ...parsed, workspaceRoot: path.resolve(value) });
 }
 
 async function listMarkdownFiles(dir: string): Promise<string[]> {
@@ -87,8 +101,7 @@ async function repairAll(workspaceRoot: string, files: string[], sessionIds: Set
 }
 
 async function main(): Promise<void> {
-  const dryRun = process.argv.includes("--dry-run");
-  const workspaceRoot = parseWorkspaceArg(process.argv);
+  const { dryRun, workspaceRoot } = parseArgs(process.argv.slice(2));
   const sessionIds = await loadSessionIds(workspaceRoot);
   const files = await listMarkdownFiles(path.join(workspaceRoot, WORKSPACE_DIRS.summaries));
   const { total, skipped, touchedFiles, failed } = await repairAll(workspaceRoot, files, sessionIds, dryRun);
