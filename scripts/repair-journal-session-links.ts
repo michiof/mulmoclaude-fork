@@ -1,6 +1,6 @@
 // Manual one-off (#3417): rewrites session links in existing journal summaries that were written as
 // `/chat/<id>.jsonl` and therefore resolve to `<workspace>/chat/`, which does not exist.
-// Usage: yarn journal:repair-links [--dry-run] [--workspace <dir>]
+// Usage: yarn journal:repair-links [--dry-run] [--workspace <dir>]. Stop the MulmoClaude server first so a journal pass cannot write the same files.
 
 import path from "node:path";
 import fsp from "node:fs/promises";
@@ -31,13 +31,49 @@ async function loadSessionIds(workspaceRoot: string): Promise<Set<string>> {
 }
 
 async function repairFile(workspaceRoot: string, filePath: string, sessionIds: Set<string>, dryRun: boolean): Promise<number> {
-  const original = await fsp.readFile(filePath, "utf-8");
+  const originalBytes = await fsp.readFile(filePath);
+  const original = originalBytes.toString("utf-8");
   const wsPath = path.relative(workspaceRoot, filePath).split(path.sep).join("/");
+  if (!Buffer.from(original, "utf-8").equals(originalBytes)) {
+    console.warn(`skipped ${wsPath}: not valid UTF-8, left untouched`);
+    return 0;
+  }
   const { content, repairedCount } = repairSessionLinks(wsPath, original, (sessionId) => sessionIds.has(sessionId));
   if (repairedCount === 0) return 0;
+  if (!dryRun && !(await writeIfUnchanged(filePath, original, content))) {
+    console.warn(`skipped ${wsPath}: changed while the script ran, rerun to repair it`);
+    return 0;
+  }
   console.log(`${dryRun ? "would repair" : "repaired"} ${repairedCount} link(s) in ${wsPath}`);
-  if (!dryRun) await writeFileAtomic(filePath, content);
   return repairedCount;
+}
+
+// Narrows, but cannot close, the window in which a running journal pass could be overwritten; stop the server first.
+async function writeIfUnchanged(filePath: string, original: string, content: string): Promise<boolean> {
+  if ((await fsp.readFile(filePath, "utf-8")) !== original) return false;
+  await writeFileAtomic(filePath, content);
+  return true;
+}
+
+async function repairAll(
+  workspaceRoot: string,
+  files: string[],
+  sessionIds: Set<string>,
+  dryRun: boolean,
+): Promise<{ total: number; touchedFiles: number; failed: string[] }> {
+  const failed: string[] = [];
+  const outcome = { total: 0, touchedFiles: 0, failed };
+  for (const filePath of files) {
+    try {
+      const count = await repairFile(workspaceRoot, filePath, sessionIds, dryRun);
+      outcome.total += count;
+      if (count > 0) outcome.touchedFiles += 1;
+    } catch (err) {
+      outcome.failed.push(filePath);
+      console.error(`failed ${filePath}: ${errorMessage(err)}`);
+    }
+  }
+  return outcome;
 }
 
 async function main(): Promise<void> {
@@ -45,11 +81,11 @@ async function main(): Promise<void> {
   const workspaceRoot = parseWorkspaceArg(process.argv);
   const sessionIds = await loadSessionIds(workspaceRoot);
   const files = await listMarkdownFiles(path.join(workspaceRoot, WORKSPACE_DIRS.summaries));
-  const counts = await Promise.all(files.map((filePath) => repairFile(workspaceRoot, filePath, sessionIds, dryRun)));
-  const total = counts.reduce((sum, count) => sum + count, 0);
+  const { total, touchedFiles, failed } = await repairAll(workspaceRoot, files, sessionIds, dryRun);
   console.log(
-    `journal:repair-links — ${dryRun ? "would repair" : "repaired"} ${total} link(s) in ${counts.filter((count) => count > 0).length} file(s) (${files.length} scanned)`,
+    `journal:repair-links — ${dryRun ? "would repair" : "repaired"} ${total} link(s) in ${touchedFiles} file(s) (${files.length} scanned, ${failed.length} failed)`,
   );
+  if (failed.length > 0) process.exitCode = 1;
 }
 
 main().catch((err) => {

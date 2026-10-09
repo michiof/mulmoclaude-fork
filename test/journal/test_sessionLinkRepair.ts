@@ -59,4 +59,26 @@ describe("repairSessionLinks", () => {
     const content = `[s](../../../../../../chat/${SESSION_ID}.jsonl)`;
     assert.equal(repairSessionLinks("conversations/summaries/topics/foo.md", content, existing).repairedCount, 0);
   });
+
+  it("leaves inline code, fenced code and titled links exactly as written", () => {
+    const code = `\`[s](../../../chat/${SESSION_ID}.jsonl)\``;
+    const fenced = ["```", `[s](../../../chat/${SESSION_ID}.jsonl)`, "```"].join("\n");
+    const tilde = ["~~~md", `[s](../../../chat/${SESSION_ID}.jsonl)`, "~~~"].join("\n");
+    const titled = `[s](../../../chat/${SESSION_ID}.jsonl "title")`;
+    const content = [code, fenced, tilde, titled].join("\n");
+    assert.deepEqual(repairSessionLinks("conversations/summaries/topics/foo.md", content, existing), { content, repairedCount: 0 });
+  });
+
+  it("repairs prose around code and after a closed fence, and keeps CRLF", () => {
+    const link = (parents: string) => `[s](${parents}chat/${SESSION_ID}.jsonl)`;
+    const content = [`\`x\` ${link("../../../")}`, "```", link("../../../"), "```", link("../../../")].join("\r\n");
+    const result = repairSessionLinks("conversations/summaries/topics/foo.md", content, existing);
+    assert.equal(result.repairedCount, 2);
+    assert.equal(result.content, [`\`x\` ${link("../../")}`, "```", link("../../../"), "```", link("../../")].join("\r\n"));
+  });
+
+  it("treats an unmatched backtick as prose", () => {
+    const result = repairSessionLinks("conversations/summaries/topics/foo.md", `it\`s [s](../../../chat/${SESSION_ID}.jsonl)`, existing);
+    assert.equal(result.repairedCount, 1);
+  });
 });
