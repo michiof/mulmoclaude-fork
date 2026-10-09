@@ -5,9 +5,9 @@
 import path from "node:path";
 import fsp from "node:fs/promises";
 import { errorMessage } from "../server/utils/errors.js";
-import { writeFileAtomic } from "../server/utils/files/atomic.js";
 import { WORKSPACE_DIRS, workspacePath } from "../server/workspace/paths.js";
 import { repairSessionLinks } from "../server/workspace/journal/sessionLinkRepair.js";
+import { replaceIfUnchanged } from "../server/workspace/journal/replaceIfUnchanged.js";
 
 const JSONL_SUFFIX = ".jsonl";
 
@@ -63,19 +63,12 @@ async function repairFile(workspaceRoot: string, filePath: string, sessionIds: S
   const { content, repairedCount, skippedCount } = repairSessionLinks(wsPath, original, (sessionId) => sessionIds.has(sessionId));
   if (skippedCount > 0) console.warn(`left ${skippedCount} broken link(s) in ${wsPath}: their paragraph holds raw HTML or starts indented, fix by hand`);
   if (repairedCount === 0) return { repaired: 0, skipped: skippedCount };
-  if (!dryRun && !(await writeIfUnchanged(filePath, original, content))) {
+  if (!dryRun && !(await replaceIfUnchanged(filePath, originalBytes, content))) {
     console.warn(`skipped ${wsPath}: changed while the script ran, rerun to repair it`);
     return { repaired: 0, skipped: skippedCount };
   }
   console.log(`${dryRun ? "would repair" : "repaired"} ${repairedCount} link(s) in ${wsPath}`);
   return { repaired: repairedCount, skipped: skippedCount };
-}
-
-// Narrows, but cannot close, the window in which a running journal pass could be overwritten; stop the server first.
-async function writeIfUnchanged(filePath: string, original: string, content: string): Promise<boolean> {
-  if ((await fsp.readFile(filePath, "utf-8")) !== original) return false;
-  await writeFileAtomic(filePath, content);
-  return true;
 }
 
 interface RunOutcome {
