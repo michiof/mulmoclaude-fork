@@ -1,6 +1,6 @@
 // Manual one-off (#3417): rewrites session links in existing journal summaries that were written as
 // `/chat/<id>.jsonl` and therefore resolve to `<workspace>/chat/`, which does not exist.
-// Usage: yarn journal:repair-links [--dry-run] [--workspace <dir>]; any other argument is an error. Stop the MulmoClaude server first so a journal pass cannot write the same files.
+// Usage: yarn journal:repair-links --workspace <dir> | --dry-run [--workspace <dir>]; any other argument is an error, and writing requires --workspace. Stop the MulmoClaude server first so a journal pass cannot write the same files.
 
 import path from "node:path";
 import fsp from "node:fs/promises";
@@ -18,17 +18,18 @@ const WORKSPACE_FLAG = "--workspace";
 interface ParsedArgs {
   dryRun: boolean;
   workspaceRoot: string;
+  workspaceGiven: boolean;
 }
 
 // Strict on purpose: this rewrites files in place, so a typo or a flag without its value must stop the run, never fall back to a default.
-function parseArgs(args: string[], parsed: ParsedArgs = { dryRun: false, workspaceRoot: workspacePath }): ParsedArgs {
+function parseArgs(args: string[], parsed: ParsedArgs = { dryRun: false, workspaceRoot: workspacePath, workspaceGiven: false }): ParsedArgs {
   const [arg, ...rest] = args;
   if (arg === undefined) return parsed;
   if (arg === DRY_RUN_FLAG) return parseArgs(rest, { ...parsed, dryRun: true });
   if (arg !== WORKSPACE_FLAG) throw new Error(`unknown argument "${arg}" (expected ${DRY_RUN_FLAG} or ${WORKSPACE_FLAG} <dir>)`);
   const [value, ...afterValue] = rest;
   if (value === undefined || value.trim() === "" || value.startsWith(FLAG_PREFIX)) throw new Error(`${WORKSPACE_FLAG} needs a directory`);
-  return parseArgs(afterValue, { ...parsed, workspaceRoot: path.resolve(value) });
+  return parseArgs(afterValue, { ...parsed, workspaceRoot: path.resolve(value), workspaceGiven: true });
 }
 
 async function listMarkdownFiles(dir: string): Promise<string[]> {
@@ -101,7 +102,9 @@ async function repairAll(workspaceRoot: string, files: string[], sessionIds: Set
 }
 
 async function main(): Promise<void> {
-  const { dryRun, workspaceRoot } = parseArgs(process.argv.slice(2));
+  const { dryRun, workspaceRoot, workspaceGiven } = parseArgs(process.argv.slice(2));
+  // Only a preview may fall back to the default workspace; a real run must name its target, whatever the environment says.
+  if (!dryRun && !workspaceGiven) throw new Error(`a real run needs ${WORKSPACE_FLAG} <dir> (${DRY_RUN_FLAG} previews the default workspace)`);
   console.log(`journal:repair-links — workspace ${workspaceRoot}${dryRun ? " (dry run)" : ""}`);
   const sessionIds = await loadSessionIds(workspaceRoot);
   const files = await listMarkdownFiles(path.join(workspaceRoot, WORKSPACE_DIRS.summaries));

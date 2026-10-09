@@ -58,10 +58,10 @@ describe("repair-journal-session-links script", () => {
   it("refuses to run on a flag without its value or on an unknown flag, and touches nothing", () => {
     const env = { ...process.env, MULMOCLAUDE_WORKSPACE_PATH: workspace };
     const contentBefore = fsSync.readFileSync(topicFile, "utf-8");
-    [["--workspace"], ["--workspace", ""], ["--workspace", "  "], ["--workspace", "--dry-run"], ["--dry-rn"], ["stray"]].forEach((args) => {
+    [[], ["--workspace"], ["--workspace", ""], ["--workspace", "  "], ["--workspace", "--dry-run"], ["--dry-rn"], ["stray"]].forEach((args) => {
       const result = spawnSync(process.execPath, ["--import", "tsx", SCRIPT_PATH, ...args], { encoding: "utf-8", env });
       assert.equal(result.status, 1, args.join(" "));
-      assert.match(result.stderr, /unknown argument|needs a directory/, args.join(" "));
+      assert.match(result.stderr, /unknown argument|needs a directory|needs --workspace/, args.join(" "));
       assert.equal(fsSync.readFileSync(topicFile, "utf-8"), contentBefore);
     });
   });
