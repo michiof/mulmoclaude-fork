@@ -37,7 +37,9 @@ describe("repair-journal-session-links script", () => {
   after(() => fsSync.rmSync(workspace, { recursive: true, force: true }));
 
   it("dry run writes nothing, a real run repairs, a second run changes nothing", () => {
-    assert.match(runScript(workspace, "--dry-run"), /would repair 1 link/);
+    const dryRunOutput = runScript(workspace, "--dry-run");
+    assert.match(dryRunOutput, /would repair 1 link/);
+    assert.ok(dryRunOutput.includes(`workspace ${workspace}`), "the resolved workspace is printed before anything is written");
     assert.equal(fsSync.readFileSync(topicFile, "utf-8"), `${BROKEN_LINK}\n`);
     assert.match(runScript(workspace), /repaired 1 link/);
     assert.equal(fsSync.readFileSync(topicFile, "utf-8"), `${FIXED_LINK}\n`);
@@ -56,7 +58,7 @@ describe("repair-journal-session-links script", () => {
   it("refuses to run on a flag without its value or on an unknown flag, and touches nothing", () => {
     const env = { ...process.env, MULMOCLAUDE_WORKSPACE_PATH: workspace };
     const contentBefore = fsSync.readFileSync(topicFile, "utf-8");
-    [["--workspace"], ["--workspace", "--dry-run"], ["--dry-rn"], ["stray"]].forEach((args) => {
+    [["--workspace"], ["--workspace", ""], ["--workspace", "  "], ["--workspace", "--dry-run"], ["--dry-rn"], ["stray"]].forEach((args) => {
       const result = spawnSync(process.execPath, ["--import", "tsx", SCRIPT_PATH, ...args], { encoding: "utf-8", env });
       assert.equal(result.status, 1, args.join(" "));
       assert.match(result.stderr, /unknown argument|needs a directory/, args.join(" "));

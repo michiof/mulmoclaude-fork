@@ -27,7 +27,7 @@ function parseArgs(args: string[], parsed: ParsedArgs = { dryRun: false, workspa
   if (arg === DRY_RUN_FLAG) return parseArgs(rest, { ...parsed, dryRun: true });
   if (arg !== WORKSPACE_FLAG) throw new Error(`unknown argument "${arg}" (expected ${DRY_RUN_FLAG} or ${WORKSPACE_FLAG} <dir>)`);
   const [value, ...afterValue] = rest;
-  if (value === undefined || value.startsWith(FLAG_PREFIX)) throw new Error(`${WORKSPACE_FLAG} needs a directory`);
+  if (value === undefined || value.trim() === "" || value.startsWith(FLAG_PREFIX)) throw new Error(`${WORKSPACE_FLAG} needs a directory`);
   return parseArgs(afterValue, { ...parsed, workspaceRoot: path.resolve(value) });
 }
 
@@ -102,6 +102,7 @@ async function repairAll(workspaceRoot: string, files: string[], sessionIds: Set
 
 async function main(): Promise<void> {
   const { dryRun, workspaceRoot } = parseArgs(process.argv.slice(2));
+  console.log(`journal:repair-links — workspace ${workspaceRoot}${dryRun ? " (dry run)" : ""}`);
   const sessionIds = await loadSessionIds(workspaceRoot);
   const files = await listMarkdownFiles(path.join(workspaceRoot, WORKSPACE_DIRS.summaries));
   const { total, skipped, touchedFiles, failed } = await repairAll(workspaceRoot, files, sessionIds, dryRun);
