@@ -38,6 +38,8 @@ const MIN_FENCE_LENGTH = 3;
 const MAX_FENCE_INDENT = 3;
 const INDENTED_CODE_SPACES = "    ";
 const TAB = "\t";
+const DIGIT_ZERO = 48;
+const DIGIT_NINE = 57;
 
 interface FenceLine {
   char: string;
@@ -112,6 +114,43 @@ function findClosingRun(text: string, from: number, runLength: number): number {
   return -1;
 }
 
+const QUOTE_MARKER = ">";
+const LIST_BULLETS = ["-", "*", "+"];
+
+function listMarkerLength(text: string): number {
+  const [first] = text;
+  if (first !== undefined && LIST_BULLETS.includes(first)) return text[1] === " " || text[1] === TAB ? 2 : 0;
+  let digits = 0;
+  while (digits < text.length && text.charCodeAt(digits) >= DIGIT_ZERO && text.charCodeAt(digits) <= DIGIT_NINE) digits += 1;
+  const after = text[digits];
+  return digits > 0 && (after === "." || after === ")") && (text[digits + 1] === " " || text[digits + 1] === TAB) ? digits + 2 : 0;
+}
+
+// The line with leading blockquote and list-item markers removed, so a fence or HTML block wrapped in a container is still recognised.
+function stripContainers(line: string): string {
+  let rest = line.trimStart();
+  for (;;) {
+    const markerLength = rest.startsWith(QUOTE_MARKER) ? 1 : listMarkerLength(rest);
+    if (markerLength === 0) return rest;
+    rest = rest.slice(markerLength).trimStart();
+  }
+}
+
+// The line with blockquote markers (and their one optional space) removed, keeping the indent that follows.
+function stripQuoteMarkers(line: string): string {
+  let rest = line;
+  while (rest.trimStart().startsWith(QUOTE_MARKER) && line.length - rest.length <= MAX_FENCE_INDENT) {
+    rest = rest.trimStart().slice(1);
+    if (rest.startsWith(" ")) rest = rest.slice(1);
+  }
+  return rest;
+}
+
+function startsIndentedCode(line: string): boolean {
+  const rest = stripQuoteMarkers(line);
+  return rest.startsWith(INDENTED_CODE_SPACES) || rest.startsWith(TAB);
+}
+
 type BlockKind = "prose" | "fence" | "html" | "blank";
 
 interface Block {
@@ -122,7 +161,8 @@ interface Block {
 type RawRegion = { kind: "fence"; fence: FenceLine } | { kind: "html"; end: HtmlBlockEnd };
 
 // The region `line` opens (fenced code, or a raw HTML block that can span blank lines), and whether it already closes on that line.
-function openRegion(line: string): { region: RawRegion; closesHere: boolean } | null {
+function openRegion(rawLine: string): { region: RawRegion; closesHere: boolean } | null {
+  const line = stripContainers(rawLine);
   const fence = opensFence(line);
   if (fence !== null) return { region: { kind: "fence", fence }, closesHere: false };
   const end = openHtmlBlock(line);
@@ -130,7 +170,8 @@ function openRegion(line: string): { region: RawRegion; closesHere: boolean } | 
   return { region: { kind: "html", end }, closesHere: endsHtmlBlock(line, end, line.toLowerCase().indexOf("<") + 1) };
 }
 
-function closesRegion(line: string, region: RawRegion): boolean {
+function closesRegion(rawLine: string, region: RawRegion): boolean {
+  const line = stripContainers(rawLine);
   return region.kind === "fence" ? closesFence(line, region.fence) : endsHtmlBlock(line, region.end, 0);
 }
 
@@ -166,8 +207,7 @@ function splitBlocks(content: string): Block[] {
 // A paragraph is edited only when it holds no construct this module does not parse: raw HTML, or an indented-code start.
 // Code spans are parsed (they may cross lines, never a blank line); anything not parsed is left alone rather than guessed at.
 function isEditableParagraph(text: string): boolean {
-  if (text.includes(HTML_OPEN)) return false;
-  return !text.startsWith(INDENTED_CODE_SPACES) && !text.startsWith(TAB);
+  return !text.includes(HTML_OPEN) && !text.split("\n").some(startsIndentedCode);
 }
 
 // Points links that resolve to `<workspace>/chat/<id>.jsonl` at the real `conversations/chat/<id>.jsonl`.

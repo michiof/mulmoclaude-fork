@@ -155,4 +155,34 @@ describe("repairSessionLinks", () => {
     const content = ["<scripty>", "", BROKEN].join("\n");
     assert.equal(repairSessionLinks(TOPIC_FILE, content, existing).content, ["<scripty>", "", FIXED].join("\n"));
   });
+
+  it("leaves code wrapped in list items and blockquotes untouched (fail closed on containers)", () => {
+    const wrapped = [
+      ["- ~~~", `  ${BROKEN}`, "  ~~~"],
+      ["> ~~~", `> ${BROKEN}`, "> ~~~"],
+      ["1. ```", `   ${BROKEN}`, "   ```"],
+      ["> - ```", `>   ${BROKEN}`, ">   ```"],
+      [`>     ${BROKEN}`],
+      [`> > ${"    "}${BROKEN}`],
+      ["> <script>", ">", `> ${BROKEN}`, ">", "> </script>"],
+    ];
+    wrapped.forEach((lines) => {
+      const text = lines.join("\n");
+      const result = repairSessionLinks(TOPIC_FILE, text, existing);
+      assert.equal(result.content, text, text);
+      assert.equal(result.repairedCount, 0, text);
+    });
+  });
+
+  it("still repairs ordinary bullets, numbered items, nested bullets and quotes", () => {
+    const text = [`- a ${BROKEN}`, `  - nested ${BROKEN}`, `1. n ${BROKEN}`, `> q ${BROKEN}`, `* star ${BROKEN}`].join("\n");
+    const result = repairSessionLinks(TOPIC_FILE, text, existing);
+    assert.equal(result.content, text.split(BROKEN).join(FIXED));
+    assert.equal(result.repairedCount, 5);
+  });
+
+  it("closes a container fence after its closer and resumes repairing", () => {
+    const text = ["- ~~~", `  ${BROKEN}`, "  ~~~", "", BROKEN].join("\n");
+    assert.equal(repairSessionLinks(TOPIC_FILE, text, existing).content, ["- ~~~", `  ${BROKEN}`, "  ~~~", "", FIXED].join("\n"));
+  });
 });
