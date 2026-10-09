@@ -37,7 +37,7 @@ describe("repairSessionLinks", () => {
 
   it("leaves links to sessions that exist nowhere", () => {
     const content = "[s](../../../chat/deleted.jsonl)";
-    assert.deepEqual(repairSessionLinks("conversations/summaries/topics/foo.md", content, existing), { content, repairedCount: 0 });
+    assert.deepEqual(repairSessionLinks("conversations/summaries/topics/foo.md", content, existing), { content, repairedCount: 0, skippedCount: 0 });
   });
 
   it("leaves already-correct, external and unrelated links", () => {
@@ -47,7 +47,7 @@ describe("repairSessionLinks", () => {
       "[c](../../../data/wiki/pages/x.md)",
       `[d](/chat/${SESSION_ID}.jsonl)`,
     ].join("\n");
-    assert.deepEqual(repairSessionLinks("conversations/summaries/topics/foo.md", content, existing), { content, repairedCount: 0 });
+    assert.deepEqual(repairSessionLinks("conversations/summaries/topics/foo.md", content, existing), { content, repairedCount: 0, skippedCount: 0 });
   });
 
   it("is idempotent", () => {
@@ -60,41 +60,68 @@ describe("repairSessionLinks", () => {
     assert.equal(repairSessionLinks("conversations/summaries/topics/foo.md", content, existing).repairedCount, 0);
   });
 
-  it("leaves inline code, fenced code and titled links exactly as written", () => {
-    const code = `\`[s](../../../chat/${SESSION_ID}.jsonl)\``;
-    const fenced = ["```", `[s](../../../chat/${SESSION_ID}.jsonl)`, "```"].join("\n");
-    const tilde = ["~~~md", `[s](../../../chat/${SESSION_ID}.jsonl)`, "~~~"].join("\n");
-    const titled = `[s](../../../chat/${SESSION_ID}.jsonl "title")`;
-    const content = [code, fenced, tilde, titled].join("\n");
-    assert.deepEqual(repairSessionLinks("conversations/summaries/topics/foo.md", content, existing), { content, repairedCount: 0 });
+  const BROKEN = `[s](../../../chat/${SESSION_ID}.jsonl)`;
+  const FIXED = `[s](../../chat/${SESSION_ID}.jsonl)`;
+  const TOPIC_FILE = "conversations/summaries/topics/foo.md";
+
+  it("leaves inline code spans untouched, including spans that cross lines", () => {
+    const spans = [`\`${BROKEN}\``, `\`opens here\n${BROKEN}\nand closes here\``, `\`\`a \` ${BROKEN} b\`\``, `\`one\` \`${BROKEN}\``];
+    spans.forEach((span) => {
+      const result = repairSessionLinks(TOPIC_FILE, span, existing);
+      assert.equal(result.content, span, span);
+      assert.equal(result.repairedCount, 0, span);
+    });
   });
 
-  it("repairs prose around code and after a closed fence, and keeps CRLF", () => {
-    const link = (parents: string) => `[s](${parents}chat/${SESSION_ID}.jsonl)`;
-    const content = [`\`x\` ${link("../../../")}`, "```", link("../../../"), "```", link("../../../")].join("\r\n");
-    const result = repairSessionLinks("conversations/summaries/topics/foo.md", content, existing);
-    assert.equal(result.repairedCount, 2);
-    assert.equal(result.content, [`\`x\` ${link("../../")}`, "```", link("../../../"), "```", link("../../")].join("\r\n"));
+  it("repairs a link beside inline code, before a later span, and after a span that closed", () => {
+    const content = `a \`x\` ${BROKEN} b \`y\`\n- \`z\` ${BROKEN}\nlone \` tick ${BROKEN}`;
+    const result = repairSessionLinks(TOPIC_FILE, content, existing);
+    assert.equal(result.content, `a \`x\` ${FIXED} b \`y\`\n- \`z\` ${FIXED}\nlone \` tick ${FIXED}`);
   });
 
-  it("treats an unmatched backtick as prose", () => {
-    const result = repairSessionLinks("conversations/summaries/topics/foo.md", `it\`s [s](../../../chat/${SESSION_ID}.jsonl)`, existing);
-    assert.equal(result.repairedCount, 1);
+  it("leaves paragraphs with raw HTML or an indented-code start, and counts the broken links skipped", () => {
+    const paragraphs = [`<code>${BROKEN}</code>`, `    ${BROKEN}`, `\t${BROKEN}`, `${BROKEN} <br>`];
+    paragraphs.forEach((paragraph) => {
+      const result = repairSessionLinks(TOPIC_FILE, paragraph, existing);
+      assert.equal(result.content, paragraph, paragraph);
+      assert.deepEqual([result.repairedCount, result.skippedCount], [0, 1], paragraph);
+    });
+  });
+
+  it("leaves titled links as written", () => {
+    const titled = `[t](../../../chat/${SESSION_ID}.jsonl "title")`;
+    assert.deepEqual(repairSessionLinks(TOPIC_FILE, titled, existing), { content: titled, repairedCount: 0, skippedCount: 0 });
+  });
+
+  it("repairs plain paragraphs around an HTML paragraph and keeps blank lines and CRLF", () => {
+    const content = [BROKEN, "", `<b>x</b> ${BROKEN}`, "", `${BROKEN} text`].join("\r\n");
+    const result = repairSessionLinks(TOPIC_FILE, content, existing);
+    assert.equal(result.content, [FIXED, "", `<b>x</b> ${BROKEN}`, "", `${FIXED} text`].join("\r\n"));
+    assert.deepEqual([result.repairedCount, result.skippedCount], [2, 1]);
+  });
+
+  it("leaves fenced code alone and resumes repairing after the closing fence", () => {
+    const content = ["```", BROKEN, "```", BROKEN].join("\n");
+    assert.equal(repairSessionLinks(TOPIC_FILE, content, existing).content, ["```", BROKEN, "```", FIXED].join("\n"));
+    const tilde = ["~~~md", BROKEN, "~~~"].join("\n");
+    assert.equal(repairSessionLinks(TOPIC_FILE, tilde, existing).repairedCount, 0);
   });
 
   it("follows CommonMark fence rules: longer openers, closers with trailing text, deep indent", () => {
-    const link = `[s](../../../chat/${SESSION_ID}.jsonl)`;
-    const fixed = `[s](../../chat/${SESSION_ID}.jsonl)`;
-    const dir = "conversations/summaries/topics/foo.md";
-    const longer = ["````", link, "```", link, "````", link].join("\n");
-    assert.equal(repairSessionLinks(dir, longer, existing).content, ["````", link, "```", link, "````", fixed].join("\n"));
-    const trailing = ["```", link, "``` not a close", link, "```", link].join("\n");
-    assert.equal(repairSessionLinks(dir, trailing, existing).content, ["```", link, "``` not a close", link, "```", fixed].join("\n"));
-    const longCloser = ["```", link, "`````", link].join("\n");
-    assert.equal(repairSessionLinks(dir, longCloser, existing).content, ["```", link, "`````", fixed].join("\n"));
-    const indented = ["    ```", link].join("\n");
-    assert.equal(repairSessionLinks(dir, indented, existing).content, ["    ```", fixed].join("\n"));
-    const backtickInfo = ["``` has `tick`", link].join("\n");
-    assert.equal(repairSessionLinks(dir, backtickInfo, existing).repairedCount, 1);
+    const dir = TOPIC_FILE;
+    const longer = ["````", BROKEN, "```", BROKEN, "````", BROKEN].join("\n");
+    assert.equal(repairSessionLinks(dir, longer, existing).content, ["````", BROKEN, "```", BROKEN, "````", FIXED].join("\n"));
+    const trailing = ["```", BROKEN, "``` not a close", BROKEN, "```", BROKEN].join("\n");
+    assert.equal(repairSessionLinks(dir, trailing, existing).content, ["```", BROKEN, "``` not a close", BROKEN, "```", FIXED].join("\n"));
+    const longCloser = ["```", BROKEN, "`````", BROKEN].join("\n");
+    assert.equal(repairSessionLinks(dir, longCloser, existing).content, ["```", BROKEN, "`````", FIXED].join("\n"));
+    const unclosed = ["```", BROKEN, BROKEN].join("\n");
+    assert.equal(repairSessionLinks(dir, unclosed, existing).repairedCount, 0);
+  });
+
+  it("is idempotent on mixed content", () => {
+    const content = [BROKEN, "", `<b>c</b> ${BROKEN}`, "```", BROKEN, "```"].join("\n");
+    const first = repairSessionLinks(TOPIC_FILE, content, existing);
+    assert.deepEqual(repairSessionLinks(TOPIC_FILE, first.content, existing), { content: first.content, repairedCount: 0, skippedCount: 1 });
   });
 });

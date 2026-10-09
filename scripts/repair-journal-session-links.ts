@@ -30,22 +30,30 @@ async function loadSessionIds(workspaceRoot: string): Promise<Set<string>> {
   return new Set(names.filter((name) => name.endsWith(JSONL_SUFFIX)).map((name) => name.slice(0, -JSONL_SUFFIX.length)));
 }
 
-async function repairFile(workspaceRoot: string, filePath: string, sessionIds: Set<string>, dryRun: boolean): Promise<number> {
+interface FileOutcome {
+  repaired: number;
+  skipped: number;
+}
+
+const UNTOUCHED: FileOutcome = { repaired: 0, skipped: 0 };
+
+async function repairFile(workspaceRoot: string, filePath: string, sessionIds: Set<string>, dryRun: boolean): Promise<FileOutcome> {
   const originalBytes = await fsp.readFile(filePath);
   const original = originalBytes.toString("utf-8");
   const wsPath = path.relative(workspaceRoot, filePath).split(path.sep).join("/");
   if (!Buffer.from(original, "utf-8").equals(originalBytes)) {
     console.warn(`skipped ${wsPath}: not valid UTF-8, left untouched`);
-    return 0;
+    return UNTOUCHED;
   }
-  const { content, repairedCount } = repairSessionLinks(wsPath, original, (sessionId) => sessionIds.has(sessionId));
-  if (repairedCount === 0) return 0;
+  const { content, repairedCount, skippedCount } = repairSessionLinks(wsPath, original, (sessionId) => sessionIds.has(sessionId));
+  if (skippedCount > 0) console.warn(`left ${skippedCount} broken link(s) in ${wsPath}: their paragraph holds raw HTML or starts indented, fix by hand`);
+  if (repairedCount === 0) return { repaired: 0, skipped: skippedCount };
   if (!dryRun && !(await writeIfUnchanged(filePath, original, content))) {
     console.warn(`skipped ${wsPath}: changed while the script ran, rerun to repair it`);
-    return 0;
+    return { repaired: 0, skipped: skippedCount };
   }
   console.log(`${dryRun ? "would repair" : "repaired"} ${repairedCount} link(s) in ${wsPath}`);
-  return repairedCount;
+  return { repaired: repairedCount, skipped: skippedCount };
 }
 
 // Narrows, but cannot close, the window in which a running journal pass could be overwritten; stop the server first.
@@ -55,19 +63,21 @@ async function writeIfUnchanged(filePath: string, original: string, content: str
   return true;
 }
 
-async function repairAll(
-  workspaceRoot: string,
-  files: string[],
-  sessionIds: Set<string>,
-  dryRun: boolean,
-): Promise<{ total: number; touchedFiles: number; failed: string[] }> {
-  const failed: string[] = [];
-  const outcome = { total: 0, touchedFiles: 0, failed };
+interface RunOutcome {
+  total: number;
+  skipped: number;
+  touchedFiles: number;
+  failed: string[];
+}
+
+async function repairAll(workspaceRoot: string, files: string[], sessionIds: Set<string>, dryRun: boolean): Promise<RunOutcome> {
+  const outcome: RunOutcome = { total: 0, skipped: 0, touchedFiles: 0, failed: [] };
   for (const filePath of files) {
     try {
-      const count = await repairFile(workspaceRoot, filePath, sessionIds, dryRun);
-      outcome.total += count;
-      if (count > 0) outcome.touchedFiles += 1;
+      const { repaired, skipped } = await repairFile(workspaceRoot, filePath, sessionIds, dryRun);
+      outcome.total += repaired;
+      outcome.skipped += skipped;
+      if (repaired > 0) outcome.touchedFiles += 1;
     } catch (err) {
       outcome.failed.push(filePath);
       console.error(`failed ${filePath}: ${errorMessage(err)}`);
@@ -81,9 +91,9 @@ async function main(): Promise<void> {
   const workspaceRoot = parseWorkspaceArg(process.argv);
   const sessionIds = await loadSessionIds(workspaceRoot);
   const files = await listMarkdownFiles(path.join(workspaceRoot, WORKSPACE_DIRS.summaries));
-  const { total, touchedFiles, failed } = await repairAll(workspaceRoot, files, sessionIds, dryRun);
+  const { total, skipped, touchedFiles, failed } = await repairAll(workspaceRoot, files, sessionIds, dryRun);
   console.log(
-    `journal:repair-links — ${dryRun ? "would repair" : "repaired"} ${total} link(s) in ${touchedFiles} file(s) (${files.length} scanned, ${failed.length} failed)`,
+    `journal:repair-links — ${dryRun ? "would repair" : "repaired"} ${total} link(s) in ${touchedFiles} file(s), left ${skipped} unrepaired (${files.length} scanned, ${failed.length} failed)`,
   );
   if (failed.length > 0) process.exitCode = 1;
 }

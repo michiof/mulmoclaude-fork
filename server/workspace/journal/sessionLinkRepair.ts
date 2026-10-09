@@ -9,6 +9,8 @@ const MISCOUNTED_CHAT_DIR = "chat";
 export interface SessionLinkRepairResult {
   content: string;
   repairedCount: number;
+  // Broken links left as written because their paragraph holds raw HTML or starts indented.
+  skippedCount: number;
 }
 
 // Session id when `resolvedPath` is exactly `chat/<id>.jsonl` at the workspace root.
@@ -28,55 +30,13 @@ function repairHref(href: string, currentDir: string, sessionExists: (sessionId:
   return `${path.posix.relative(currentDir, target)}${suffix}`;
 }
 
+const BACKTICK = "`";
+const HTML_OPEN = "<";
 const FENCE_CHARS = ["`", "~"];
 const MIN_FENCE_LENGTH = 3;
 const MAX_FENCE_INDENT = 3;
-const BACKTICK = "`";
-
-// Splits a line into prose and inline-code segments; an unmatched backtick run is plain prose.
-function splitInlineCode(line: string): { text: string; isCode: boolean }[] {
-  const segments: { text: string; isCode: boolean }[] = [];
-  let proseStart = 0;
-  let index = 0;
-  while (index < line.length) {
-    if (line[index] !== BACKTICK) {
-      index += 1;
-      continue;
-    }
-    const runLength = backtickRunLength(line, index);
-    const closeIndex = findClosingRun(line, index + runLength, runLength);
-    if (closeIndex === -1) {
-      index += runLength;
-      continue;
-    }
-    if (index > proseStart) segments.push({ text: line.slice(proseStart, index), isCode: false });
-    segments.push({ text: line.slice(index, closeIndex + runLength), isCode: true });
-    proseStart = closeIndex + runLength;
-    index = proseStart;
-  }
-  if (proseStart < line.length) segments.push({ text: line.slice(proseStart), isCode: false });
-  return segments;
-}
-
-function backtickRunLength(line: string, from: number): number {
-  let end = from;
-  while (line[end] === BACKTICK) end += 1;
-  return end - from;
-}
-
-function findClosingRun(line: string, from: number, runLength: number): number {
-  let index = from;
-  while (index < line.length) {
-    if (line[index] !== BACKTICK) {
-      index += 1;
-      continue;
-    }
-    const length = backtickRunLength(line, index);
-    if (length === runLength) return index;
-    index += length;
-  }
-  return -1;
-}
+const INDENTED_CODE_SPACES = "    ";
+const TAB = "\t";
 
 interface FenceLine {
   char: string;
@@ -106,39 +66,118 @@ function closesFence(line: string, open: FenceLine): boolean {
   return fence !== null && fence.char === open.char && fence.length >= open.length && fence.rest.trim() === "";
 }
 
-// Applies `repairProse` to every line outside fenced code and every segment outside inline code.
-function mapProseOnly(content: string, repairProse: (prose: string) => string): string {
+// Splits text (possibly several lines, never crossing a blank text) into prose and inline-code segments; an unmatched backtick run is plain prose.
+function splitInlineCode(text: string): { text: string; isCode: boolean }[] {
+  const segments: { text: string; isCode: boolean }[] = [];
+  let proseStart = 0;
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] !== BACKTICK) {
+      index += 1;
+      continue;
+    }
+    const runLength = backtickRunLength(text, index);
+    const closeIndex = findClosingRun(text, index + runLength, runLength);
+    if (closeIndex === -1) {
+      index += runLength;
+      continue;
+    }
+    if (index > proseStart) segments.push({ text: text.slice(proseStart, index), isCode: false });
+    segments.push({ text: text.slice(index, closeIndex + runLength), isCode: true });
+    proseStart = closeIndex + runLength;
+    index = proseStart;
+  }
+  if (proseStart < text.length) segments.push({ text: text.slice(proseStart), isCode: false });
+  return segments;
+}
+
+function backtickRunLength(text: string, from: number): number {
+  let end = from;
+  while (text[end] === BACKTICK) end += 1;
+  return end - from;
+}
+
+function findClosingRun(text: string, from: number, runLength: number): number {
+  let index = from;
+  while (index < text.length) {
+    if (text[index] !== BACKTICK) {
+      index += 1;
+      continue;
+    }
+    const length = backtickRunLength(text, index);
+    if (length === runLength) return index;
+    index += length;
+  }
+  return -1;
+}
+
+type BlockKind = "prose" | "fence" | "blank";
+
+interface Block {
+  kind: BlockKind;
+  text: string;
+}
+
+// Splits into fenced code, blank lines and paragraphs (runs of non-blank lines outside fences).
+function splitBlocks(content: string): Block[] {
+  const blocks: Block[] = [];
+  let paragraph: string[] = [];
   let openFence: FenceLine | null = null;
-  return content
-    .split("\n")
-    .map((line) => {
-      if (openFence !== null) {
-        if (closesFence(line, openFence)) openFence = null;
-        return line;
-      }
-      openFence = opensFence(line);
-      if (openFence !== null) return line;
-      return splitInlineCode(line)
-        .map((segment) => (segment.isCode ? segment.text : repairProse(segment.text)))
-        .join("");
-    })
-    .join("\n");
+  const flush = (): void => {
+    if (paragraph.length > 0) blocks.push({ kind: "prose", text: paragraph.join("\n") });
+    paragraph = [];
+  };
+  content.split("\n").forEach((line) => {
+    const wasInFence = openFence !== null;
+    if (openFence !== null && closesFence(line, openFence)) openFence = null;
+    else if (openFence === null) openFence = opensFence(line);
+    const isFenceLine = wasInFence || openFence !== null;
+    if (isFenceLine || line.trim() === "") flush();
+    if (isFenceLine) blocks.push({ kind: "fence", text: line });
+    else if (line.trim() === "") blocks.push({ kind: "blank", text: line });
+    else paragraph.push(line);
+  });
+  flush();
+  return blocks;
+}
+
+// A paragraph is edited only when it holds no construct this module does not parse: raw HTML, or an indented-code start.
+// Code spans are parsed (they may cross lines, never a blank line); anything not parsed is left alone rather than guessed at.
+function isEditableParagraph(text: string): boolean {
+  if (text.includes(HTML_OPEN)) return false;
+  return !text.startsWith(INDENTED_CODE_SPACES) && !text.startsWith(TAB);
 }
 
 // Points links that resolve to `<workspace>/chat/<id>.jsonl` at the real `conversations/chat/<id>.jsonl`.
 // A link is left alone when the session file exists in neither place, so links to deleted sessions are not touched.
-// Supported form: single-line inline links `[text](href)` in prose. Fenced code, inline code, titled links
-// (`[t](href "title")`), reference-style and angle-bracket links are left exactly as written.
+// Supported form: inline links `[text](href)` in prose. Fenced code, inline code spans (also across lines), paragraphs with raw HTML or an
+// indented-code start, titled links (`[t](href "title")`), reference-style and angle-bracket links are left exactly as written.
 export function repairSessionLinks(fileWsPath: string, content: string, sessionExists: (sessionId: string) => boolean): SessionLinkRepairResult {
   const currentDir = path.posix.dirname(fileWsPath);
   let repairedCount = 0;
-  const repaired = mapProseOnly(content, (prose) =>
+  let skippedCount = 0;
+  const repairLinks = (prose: string): string =>
     rewriteMarkdownLinks(prose, (href) => {
       const fixed = repairHref(href, currentDir, sessionExists);
       if (fixed === null) return href;
       repairedCount += 1;
       return fixed;
-    }),
-  );
-  return { content: repaired, repairedCount };
+    });
+  const repairProse = (paragraph: string): string =>
+    splitInlineCode(paragraph)
+      .map((segment) => (segment.isCode ? segment.text : repairLinks(segment.text)))
+      .join("");
+  const countBroken = (prose: string): void => {
+    rewriteMarkdownLinks(prose, (href) => {
+      if (repairHref(href, currentDir, sessionExists) !== null) skippedCount += 1;
+      return href;
+    });
+  };
+  const repaired = splitBlocks(content).map((block) => {
+    if (block.kind !== "prose") return block.text;
+    if (isEditableParagraph(block.text)) return repairProse(block.text);
+    countBroken(block.text);
+    return block.text;
+  });
+  return { content: repaired.join("\n"), repairedCount, skippedCount };
 }
