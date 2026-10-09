@@ -28,7 +28,9 @@ function repairHref(href: string, currentDir: string, sessionExists: (sessionId:
   return `${path.posix.relative(currentDir, target)}${suffix}`;
 }
 
-const FENCE_MARKERS = ["```", "~~~"];
+const FENCE_CHARS = ["`", "~"];
+const MIN_FENCE_LENGTH = 3;
+const MAX_FENCE_INDENT = 3;
 const BACKTICK = "`";
 
 // Splits a line into prose and inline-code segments; an unmatched backtick run is plain prose.
@@ -76,26 +78,46 @@ function findClosingRun(line: string, from: number, runLength: number): number {
   return -1;
 }
 
-function fenceMarkerOf(line: string): string | null {
-  const trimmed = line.trimStart();
-  return FENCE_MARKERS.find((marker) => trimmed.startsWith(marker)) ?? null;
+interface FenceLine {
+  char: string;
+  length: number;
+  rest: string;
+}
+
+// CommonMark fence line: up to three spaces of indent, then a run of at least three backticks or tildes.
+function parseFenceLine(line: string): FenceLine | null {
+  const indent = line.length - line.trimStart().length;
+  const body = line.slice(indent);
+  const [char] = body;
+  if (indent > MAX_FENCE_INDENT || char === undefined || !FENCE_CHARS.includes(char)) return null;
+  let length = 0;
+  while (body[length] === char) length += 1;
+  return length < MIN_FENCE_LENGTH ? null : { char, length, rest: body.slice(length) };
+}
+
+function opensFence(line: string): FenceLine | null {
+  const fence = parseFenceLine(line);
+  // A backtick fence's info string may not contain a backtick, otherwise the line is inline code.
+  return fence !== null && fence.char === BACKTICK && fence.rest.includes(BACKTICK) ? null : fence;
+}
+
+function closesFence(line: string, open: FenceLine): boolean {
+  const fence = parseFenceLine(line);
+  return fence !== null && fence.char === open.char && fence.length >= open.length && fence.rest.trim() === "";
 }
 
 // Applies `repairProse` to every line outside fenced code and every segment outside inline code.
 function mapProseOnly(content: string, repairProse: (prose: string) => string): string {
-  let openFence: string | null = null;
+  let openFence: FenceLine | null = null;
   return content
     .split("\n")
     .map((line) => {
-      const marker = fenceMarkerOf(line);
       if (openFence !== null) {
-        if (marker === openFence) openFence = null;
+        if (closesFence(line, openFence)) openFence = null;
         return line;
       }
-      if (marker !== null) {
-        openFence = marker;
-        return line;
-      }
+      openFence = opensFence(line);
+      if (openFence !== null) return line;
       return splitInlineCode(line)
         .map((segment) => (segment.isCode ? segment.text : repairProse(segment.text)))
         .join("");

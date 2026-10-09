@@ -81,4 +81,20 @@ describe("repairSessionLinks", () => {
     const result = repairSessionLinks("conversations/summaries/topics/foo.md", `it\`s [s](../../../chat/${SESSION_ID}.jsonl)`, existing);
     assert.equal(result.repairedCount, 1);
   });
+
+  it("follows CommonMark fence rules: longer openers, closers with trailing text, deep indent", () => {
+    const link = `[s](../../../chat/${SESSION_ID}.jsonl)`;
+    const fixed = `[s](../../chat/${SESSION_ID}.jsonl)`;
+    const dir = "conversations/summaries/topics/foo.md";
+    const longer = ["````", link, "```", link, "````", link].join("\n");
+    assert.equal(repairSessionLinks(dir, longer, existing).content, ["````", link, "```", link, "````", fixed].join("\n"));
+    const trailing = ["```", link, "``` not a close", link, "```", link].join("\n");
+    assert.equal(repairSessionLinks(dir, trailing, existing).content, ["```", link, "``` not a close", link, "```", fixed].join("\n"));
+    const longCloser = ["```", link, "`````", link].join("\n");
+    assert.equal(repairSessionLinks(dir, longCloser, existing).content, ["```", link, "`````", fixed].join("\n"));
+    const indented = ["    ```", link].join("\n");
+    assert.equal(repairSessionLinks(dir, indented, existing).content, ["    ```", fixed].join("\n"));
+    const backtickInfo = ["``` has `tick`", link].join("\n");
+    assert.equal(repairSessionLinks(dir, backtickInfo, existing).repairedCount, 1);
+  });
 });
