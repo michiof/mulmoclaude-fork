@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fsSync from "node:fs";
 import osModule from "node:os";
 import path from "node:path";
@@ -42,6 +42,15 @@ describe("repair-journal-session-links script", () => {
     assert.match(runScript(workspace), /repaired 1 link/);
     assert.equal(fsSync.readFileSync(topicFile, "utf-8"), `${FIXED_LINK}\n`);
     assert.match(runScript(workspace), /repaired 0 link/);
+  });
+
+  it("warns about broken links it deliberately left in an HTML paragraph", () => {
+    const htmlFile = path.join(workspace, "conversations", "summaries", "topics", "html.md");
+    fsSync.writeFileSync(htmlFile, `<b>x</b> ${BROKEN_LINK}\n`);
+    const result = spawnSync(process.execPath, ["--import", "tsx", SCRIPT_PATH, "--workspace", workspace, "--dry-run"], { encoding: "utf-8" });
+    assert.match(result.stderr, /left 1 broken link\(s\) in conversations\/summaries\/topics\/html\.md/);
+    assert.equal(fsSync.readFileSync(htmlFile, "utf-8"), `<b>x</b> ${BROKEN_LINK}\n`);
+    fsSync.rmSync(htmlFile);
   });
 
   it("leaves a file that is not valid UTF-8 byte-for-byte untouched", () => {

@@ -1,6 +1,7 @@
 import path from "node:path";
 import { rewriteMarkdownLinks, splitFragmentAndQuery } from "../../utils/markdown.js";
 import { WORKSPACE_DIRS } from "../paths.js";
+import { endsHtmlBlock, openHtmlBlock, type HtmlBlockEnd } from "./htmlBlock.js";
 
 const JSONL_SUFFIX = ".jsonl";
 // Where summaries written before the prompt fix resolved their session links to.
@@ -111,31 +112,52 @@ function findClosingRun(text: string, from: number, runLength: number): number {
   return -1;
 }
 
-type BlockKind = "prose" | "fence" | "blank";
+type BlockKind = "prose" | "fence" | "html" | "blank";
 
 interface Block {
   kind: BlockKind;
   text: string;
 }
 
-// Splits into fenced code, blank lines and paragraphs (runs of non-blank lines outside fences).
+type RawRegion = { kind: "fence"; fence: FenceLine } | { kind: "html"; end: HtmlBlockEnd };
+
+// The region `line` opens (fenced code, or a raw HTML block that can span blank lines), and whether it already closes on that line.
+function openRegion(line: string): { region: RawRegion; closesHere: boolean } | null {
+  const fence = opensFence(line);
+  if (fence !== null) return { region: { kind: "fence", fence }, closesHere: false };
+  const end = openHtmlBlock(line);
+  if (end === null) return null;
+  return { region: { kind: "html", end }, closesHere: endsHtmlBlock(line, end, line.toLowerCase().indexOf("<") + 1) };
+}
+
+function closesRegion(line: string, region: RawRegion): boolean {
+  return region.kind === "fence" ? closesFence(line, region.fence) : endsHtmlBlock(line, region.end, 0);
+}
+
+// Splits into raw regions (fenced code, raw HTML blocks), blank lines and paragraphs (runs of non-blank lines).
 function splitBlocks(content: string): Block[] {
   const blocks: Block[] = [];
   let paragraph: string[] = [];
-  let openFence: FenceLine | null = null;
+  let region: RawRegion | null = null;
   const flush = (): void => {
     if (paragraph.length > 0) blocks.push({ kind: "prose", text: paragraph.join("\n") });
     paragraph = [];
   };
   content.split("\n").forEach((line) => {
-    const wasInFence = openFence !== null;
-    if (openFence !== null && closesFence(line, openFence)) openFence = null;
-    else if (openFence === null) openFence = opensFence(line);
-    const isFenceLine = wasInFence || openFence !== null;
-    if (isFenceLine || line.trim() === "") flush();
-    if (isFenceLine) blocks.push({ kind: "fence", text: line });
-    else if (line.trim() === "") blocks.push({ kind: "blank", text: line });
-    else paragraph.push(line);
+    if (region !== null) {
+      blocks.push({ kind: region.kind, text: line });
+      if (closesRegion(line, region)) region = null;
+      return;
+    }
+    const opened = openRegion(line);
+    if (opened !== null) {
+      flush();
+      blocks.push({ kind: opened.region.kind, text: line });
+      region = opened.closesHere ? null : opened.region;
+    } else if (line.trim() === "") {
+      flush();
+      blocks.push({ kind: "blank", text: line });
+    } else paragraph.push(line);
   });
   flush();
   return blocks;
@@ -174,9 +196,8 @@ export function repairSessionLinks(fileWsPath: string, content: string, sessionE
     });
   };
   const repaired = splitBlocks(content).map((block) => {
-    if (block.kind !== "prose") return block.text;
-    if (isEditableParagraph(block.text)) return repairProse(block.text);
-    countBroken(block.text);
+    if (block.kind === "prose" && isEditableParagraph(block.text)) return repairProse(block.text);
+    if (block.kind === "prose" || block.kind === "html") countBroken(block.text);
     return block.text;
   });
   return { content: repaired.join("\n"), repairedCount, skippedCount };

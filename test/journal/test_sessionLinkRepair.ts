@@ -124,4 +124,35 @@ describe("repairSessionLinks", () => {
     const first = repairSessionLinks(TOPIC_FILE, content, existing);
     assert.deepEqual(repairSessionLinks(TOPIC_FILE, first.content, existing), { content: first.content, repairedCount: 0, skippedCount: 1 });
   });
+
+  it("leaves raw HTML blocks that span blank lines untouched, counts their broken links, then resumes", () => {
+    const dir = TOPIC_FILE;
+    const blocks = [
+      ["<script>", "", BROKEN, "", "</script>"],
+      ["<PRE class=x>", "", BROKEN, "", "</Pre>"],
+      ["<style>", "", BROKEN, "</style>"],
+      ["<!--", "", BROKEN, "", "-->"],
+      ["<?php", "", BROKEN, "", "?>"],
+      ["<![CDATA[", "", BROKEN, "", "]]>"],
+      ["<!DOCTYPE", "", BROKEN, "", "html>"],
+    ];
+    blocks.forEach((block) => {
+      const html = block.join("\n");
+      const result = repairSessionLinks(dir, [html, "", BROKEN].join("\n"), existing);
+      assert.equal(result.content, [html, "", FIXED].join("\n"), html);
+      assert.deepEqual([result.repairedCount, result.skippedCount], [1, 1], html);
+    });
+  });
+
+  it("an unclosed raw HTML block protects the rest of the file; a block closed on its opening line does not", () => {
+    const unclosed = ["<script>", "", BROKEN, "", BROKEN].join("\n");
+    assert.deepEqual(repairSessionLinks(TOPIC_FILE, unclosed, existing).repairedCount, 0);
+    const oneLine = ["<!-- note -->", "", BROKEN].join("\n");
+    assert.equal(repairSessionLinks(TOPIC_FILE, oneLine, existing).content, ["<!-- note -->", "", FIXED].join("\n"));
+  });
+
+  it("does not treat tags that merely start with a raw-text name as a spanning block", () => {
+    const content = ["<scripty>", "", BROKEN].join("\n");
+    assert.equal(repairSessionLinks(TOPIC_FILE, content, existing).content, ["<scripty>", "", FIXED].join("\n"));
+  });
 });
